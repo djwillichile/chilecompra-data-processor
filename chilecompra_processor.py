@@ -3,13 +3,14 @@
 """
 ==============================================================
   ChileCompra Data Processor v3.0 - Windows/Linux/macOS
-  Descarga y procesamiento de licitaciones 2015-2026
+  Descarga y procesamiento de licitaciones publicas de Chile
   Autor: Guillermo Fuentes (djwillichile)
 ==============================================================
 
 Uso:
-    python chilecompra_processor.py          # Ejecutar (o reanudar)
-    python chilecompra_processor.py --reset   # Reiniciar desde cero
+    python chilecompra_processor.py
+    python chilecompra_processor.py --reset
+    python chilecompra_processor.py --start-year 2020 --end-year 2024
 
 Requisitos:
     pip install pandas pyarrow requests
@@ -18,6 +19,7 @@ Requisitos:
 import os
 import sys
 import signal
+import argparse
 import zipfile
 import requests
 import pandas as pd
@@ -40,8 +42,8 @@ PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 MONTHLY_DIR.mkdir(parents=True, exist_ok=True)
 
 BASE_URL = "https://transparenciachc.blob.core.windows.net/lic-da"
-START_YEAR = 2015
-END_YEAR = 2026
+DEFAULT_START_YEAR = 2015
+DEFAULT_END_YEAR = 2026
 
 IS_INTERACTIVE = sys.stdin.isatty()
 
@@ -461,12 +463,31 @@ def consolidate_final():
 # ==========================================
 # MAIN
 # ==========================================
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Descarga y procesa las licitaciones publicas de Chile (ChileCompra).'
+    )
+    parser.add_argument('--reset', action='store_true',
+                        help='Borra el progreso y los datos procesados antes de empezar.')
+    parser.add_argument('--start-year', type=int, default=DEFAULT_START_YEAR,
+                        help=f'Año inicial del periodo (default: {DEFAULT_START_YEAR}).')
+    parser.add_argument('--end-year', type=int, default=DEFAULT_END_YEAR,
+                        help=f'Año final del periodo (default: {DEFAULT_END_YEAR}).')
+    return parser.parse_args()
+
+
 def main():
     global interrupted
 
+    args = parse_args()
+
+    if args.start_year > args.end_year:
+        print(f"  [ERROR] --start-year ({args.start_year}) > --end-year ({args.end_year}).")
+        sys.exit(1)
+
     print("=" * 60)
     print("  ChileCompra Data Processor v3.0")
-    print("  Descarga y procesamiento de licitaciones 2015-2026")
+    print(f"  Periodo: {args.start_year} - {args.end_year}")
     print("=" * 60)
     print(f"  Directorio: {BASE_DIR}")
     print(f"  Procesados: {PROCESSED_DIR}")
@@ -478,7 +499,7 @@ def main():
     print("=" * 60)
     print()
 
-    if "--reset" in sys.argv:
+    if args.reset:
         print("  [!] Reiniciando desde cero...")
         reset_progress()
         print()
@@ -487,7 +508,9 @@ def main():
     processed_months = set(progress["processed_months"])
 
     all_months = []
-    for year in range(START_YEAR, END_YEAR + 1):
+    for year in range(args.start_year, args.end_year + 1):
+        # Para el año en curso 2026 solo hay datos hasta abril; para futuros años,
+        # el procesador detectara 404 y los marcara como no disponibles.
         max_month = 4 if year == 2026 else 12
         for month in range(1, max_month + 1):
             all_months.append(f"{year}-{month}")
