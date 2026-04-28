@@ -1,0 +1,69 @@
+name: Sincronizar datos ChileCompra
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag del release a descargar (vacio = ultimo)'
+        required: false
+        default: ''
+  schedule:
+    # Cada 1 del mes a las 06:00 UTC (~03:00 Chile)
+    - cron: '0 6 1 * *'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Descargar Parquet del ultimo release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data/processed
+          TAG="${{ github.event.inputs.release_tag }}"
+          if [ -n "$TAG" ]; then
+            echo "Descargando release $TAG"
+            gh release download "$TAG" \
+              --repo djwillichile/chilecompra-data-processor \
+              --pattern '*.parquet' --pattern '*.json' \
+              --dir data/processed --clobber
+          else
+            echo "Descargando ultimo release"
+            gh release download \
+              --repo djwillichile/chilecompra-data-processor \
+              --pattern '*.parquet' --pattern '*.json' \
+              --dir data/processed --clobber
+          fi
+          echo ""
+          echo "Archivos descargados:"
+          ls -lh data/processed/
+
+      - name: Detectar cambios
+        id: diff
+        run: |
+          git add data/processed/
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Sin cambios en los datos."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Hay cambios en los datos."
+          fi
+
+      - name: Commit y push
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "djwillichile"
+          git config user.email "guillermo.f1990@gmail.com"
+          git commit -m "data: sincroniza Parquet desde chilecompra-data-processor
+
+          Origen: $(date +%Y-%m-%d) - workflow sync-data.yml"
+          git push

@@ -216,6 +216,10 @@ Los datos son publicos y de libre acceso bajo la politica de datos abiertos del 
 Este procesador genera los datos utilizados en el proyecto de analisis completo:
 [chile-public-procurement-analysis](https://github.com/djwillichile/chile-public-procurement-analysis)
 
+En `examples/consumer-repo/` hay un script de descarga (`download_data.sh`) y un
+workflow de sincronizacion automatica (`sync-data.yml`) listos para copiarse al
+repo de analisis. Ver [examples/consumer-repo/README.md](examples/consumer-repo/README.md).
+
 ---
 
 ## Autor
