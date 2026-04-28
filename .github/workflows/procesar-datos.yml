@@ -11,6 +11,14 @@ on:
         options:
           - 'false'
           - 'true'
+      start_year:
+        description: 'Año inicial del periodo'
+        required: false
+        default: '2015'
+      end_year:
+        description: 'Año final del periodo'
+        required: false
+        default: '2026'
 
 permissions:
   contents: write
@@ -46,11 +54,11 @@ jobs:
 
       - name: Ejecutar procesador
         run: |
+          ARGS="--start-year ${{ github.event.inputs.start_year }} --end-year ${{ github.event.inputs.end_year }}"
           if [ "${{ github.event.inputs.reset }}" = "true" ]; then
-            python chilecompra_processor.py --reset
-          else
-            python chilecompra_processor.py
+            ARGS="--reset $ARGS"
           fi
+          python chilecompra_processor.py $ARGS
 
       - name: Listar archivos generados
         run: |

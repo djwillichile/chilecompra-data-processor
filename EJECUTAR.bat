@@ -153,13 +153,38 @@ if %errorlevel% neq 0 (
 echo [OK] Dependencias instaladas.
 echo.
 
-:: Ejecutar procesamiento
-echo [2/3] Iniciando descarga y procesamiento de datos ChileCompra (2015-2026)...
-echo       Esto puede tomar entre 30-60 minutos dependiendo de tu conexion.
-echo       Los archivos ZIP pesan entre 15-50 MB cada uno (136 archivos).
+:: Seleccion de periodo
+echo [2/3] Selecciona el periodo a procesar:
+echo.
+echo   1) Todo el historico disponible (2015-2026) [recomendado]
+echo   2) Periodo personalizado
+echo.
+set PERIOD_CHOICE=1
+set /p PERIOD_CHOICE="Opcion (1-2) [1]: "
+
+if "%PERIOD_CHOICE%"=="2" goto :custom_period
+
+:: Procesamiento completo
+echo.
+echo [INFO] Iniciando descarga y procesamiento (2015-2026)...
+echo        Esto puede tomar entre 30-60 minutos dependiendo de tu conexion.
+echo        Los archivos ZIP pesan entre 15-50 MB cada uno (136 archivos).
 echo.
 %PYTHON_CMD% "%~dp0chilecompra_processor.py"
+goto :after_run
 
+:custom_period
+echo.
+set START_YEAR=2015
+set END_YEAR=2026
+set /p START_YEAR="  Anio inicial (2015-2026) [2015]: "
+set /p END_YEAR="  Anio final   (2015-2026) [2026]: "
+echo.
+echo [INFO] Iniciando procesamiento del periodo %START_YEAR% - %END_YEAR%...
+echo.
+%PYTHON_CMD% "%~dp0chilecompra_processor.py" --start-year %START_YEAR% --end-year %END_YEAR%
+
+:after_run
 echo.
 echo [3/3] Proceso finalizado.
 echo.
