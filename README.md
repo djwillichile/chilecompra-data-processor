@@ -1,8 +1,16 @@
-# ChileCompra Data Processor
+# ChileCompra Data Processor v2.0
 
 **Herramienta automatizada para descarga y procesamiento masivo de datos de licitaciones publicas de Chile (2015-2026).**
 
 Extrae, transforma y consolida mas de 30 GB de datos crudos del portal de datos abiertos de ChileCompra en archivos Parquet compactos y listos para analisis, todo ejecutable con un solo clic en Windows.
+
+### Caracteristicas principales
+
+- **Guardado incremental:** Cada mes procesado se guarda inmediatamente en disco. Si el proceso se interrumpe, no se pierde nada.
+- **Reanudacion automatica:** Al reiniciar, detecta los meses ya procesados y continua desde donde quedo.
+- **Interrupcion limpia (Ctrl+C):** Guarda el progreso actual y sale de forma segura.
+- **Instalacion automatica de Python:** En Windows, si Python no esta instalado, ofrece descargarlo e instalarlo automaticamente.
+- **Progreso en tiempo real:** Muestra porcentaje completado, tiempo estimado restante (ETA) y registros procesados.
 
 ---
 
@@ -17,13 +25,14 @@ El portal de [Datos Abiertos de ChileCompra](https://datos-abiertos.chilecompra.
 
 ## La Solucion
 
-Este procesador resuelve todos estos problemas con una estrategia de **streaming por chunks**:
+Este procesador resuelve todos estos problemas con una estrategia de **streaming por chunks con persistencia incremental**:
 
-1. **Descarga incremental:** Obtiene cada ZIP mensual desde Azure Blob Storage.
-2. **Extraccion en memoria:** Descomprime el CSV sin almacenar archivos intermedios innecesarios.
-3. **Procesamiento por chunks:** Lee 100,000 filas a la vez, agrega y libera memoria.
-4. **Eliminacion inmediata:** Borra cada CSV crudo despues de procesarlo.
-5. **Consolidacion final:** Genera archivos Parquet compactos con las agregaciones necesarias.
+1. **Descarga secuencial:** Obtiene cada ZIP mensual desde Azure Blob Storage.
+2. **Extraccion y procesamiento:** Descomprime el CSV y lo lee en chunks de 100,000 filas.
+3. **Guardado inmediato:** Despues de procesar cada mes, guarda los resultados en Parquet al instante.
+4. **Eliminacion del crudo:** Borra cada CSV crudo despues de procesarlo para ahorrar disco.
+5. **Registro de progreso:** Mantiene un archivo `_progress.json` con los meses completados.
+6. **Consolidacion final:** Al terminar todos los meses, genera metricas derivadas e indice de oportunidad.
 
 El resultado: **7 archivos Parquet** que pesan menos de 50 MB en total, conteniendo toda la inteligencia extraida de mas de 30 GB de datos crudos.
 
@@ -53,6 +62,27 @@ python chilecompra_processor.py
 ```bash
 pip3 install pandas pyarrow requests
 python3 chilecompra_processor.py
+```
+
+---
+
+## Controles de Ejecucion
+
+| Comando / Accion | Descripcion |
+|------------------|-------------|
+| `python chilecompra_processor.py` | Ejecutar (o reanudar si hay progreso previo) |
+| `python chilecompra_processor.py --reset` | Reiniciar desde cero (borra datos procesados y progreso) |
+| `Ctrl+C` durante la ejecucion | Guardar progreso actual y salir limpiamente |
+| Ejecutar de nuevo despues de Ctrl+C | Reanuda automaticamente desde el ultimo mes completado |
+
+### Ejemplo de reanudacion
+
+```
+  [REANUDANDO] 45/136 meses ya procesados.
+  [PENDIENTE]  91 meses por procesar.
+  [REGISTROS]  3,245,678 registros acumulados.
+
+  [46/136] (33%) ETA: 0:42:15 | 2018-10 descargando...(28.5MB) procesando (456MB)...OK (87,432 registros) [GUARDADO]
 ```
 
 ---
