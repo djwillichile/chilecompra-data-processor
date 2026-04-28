@@ -127,3 +127,45 @@ jobs:
             --notes "$NOTES" \
             data/processed/*.parquet \
             data/processed/sankey_tops_2024.json
+
+      - name: Verificar token para repo de analisis
+        id: check_analysis_token
+        env:
+          TOKEN: ${{ secrets.ANALYSIS_REPO_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+            echo "[OK] ANALYSIS_REPO_TOKEN configurado, se hara push cross-repo."
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            echo "[INFO] ANALYSIS_REPO_TOKEN no configurado, se omite el push cross-repo."
+            echo "[INFO] Los datos quedan disponibles solo via el release."
+          fi
+
+      - name: Push Parquet a chile-public-procurement-analysis
+        if: steps.check_analysis_token.outputs.has_token == 'true'
+        env:
+          ANALYSIS_REPO_TOKEN: ${{ secrets.ANALYSIS_REPO_TOKEN }}
+        run: |
+          ANALYSIS_DIR=/tmp/analysis-repo
+          git clone --depth 1 \
+            "https://x-access-token:${ANALYSIS_REPO_TOKEN}@github.com/djwillichile/chile-public-procurement-analysis.git" \
+            "$ANALYSIS_DIR"
+
+          mkdir -p "$ANALYSIS_DIR/data/processed"
+          cp data/processed/*.parquet "$ANALYSIS_DIR/data/processed/"
+          cp data/processed/*.json    "$ANALYSIS_DIR/data/processed/"
+
+          cd "$ANALYSIS_DIR"
+          git config user.name  "djwillichile"
+          git config user.email "guillermo.f1990@gmail.com"
+          git add data/processed/
+
+          if git diff --cached --quiet; then
+            echo "[INFO] Sin cambios en data/processed/ del repo de analisis."
+          else
+            TAG="data-$(date +%Y-%m-%d)"
+            git commit -m "data: actualiza Parquet desde chilecompra-data-processor ($TAG)"
+            git push
+            echo "[OK] Parquet sincronizados a chile-public-procurement-analysis."
+          fi
