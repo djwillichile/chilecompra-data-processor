@@ -50,8 +50,22 @@ IS_INTERACTIVE = sys.stdin.isatty()
 USECOLS = [
     'CodigoExterno', 'NombreOrganismo', 'sector', 'RegionUnidad',
     'Tipo', 'Estado', 'MontoEstimado', 'FechaPublicacion', 'FechaAdjudicacion',
-    'NumeroOferentes', 'Rubro1', 'NombreProveedor', 'MontoLineaAdjudica'
+    'NumeroOferentes', 'Rubro1', 'NombreProveedor', 'MontoLineaAdjudica',
+    'MontoTotalAdjudicado',  # puede no existir en archivos antiguos
 ]
+
+
+def _available_usecols(csv_path):
+    """Devuelve la interseccion de USECOLS con las columnas reales del CSV.
+
+    MontoTotalAdjudicado fue introducido en versiones mas recientes de los
+    archivos publicados por ChileCompra; este filtro lo hace opcional.
+    """
+    try:
+        header = pd.read_csv(csv_path, sep=';', encoding='latin-1', nrows=0).columns.tolist()
+        return [c for c in USECOLS if c in header]
+    except Exception:
+        return [c for c in USECOLS if c != 'MontoTotalAdjudicado']
 
 # Estado global
 interrupted = False
@@ -144,38 +158,36 @@ def extract_zip(zip_path, dest_dir):
 
 
 # ==========================================
-# PROCESAMIENTO - AGREGACION MENSUAL CORRECTA
+# PROCESAMIENTO - AGREGACION A NIVEL DE LICITACION
 # ==========================================
 def process_csv(csv_path, year, month):
     """
-    Procesa un CSV por chunks y devuelve DataFrames agregados al nivel mensual.
+    Procesa un CSV mensual y devuelve agregados correctos a nivel mensual.
 
-    Estrategia para valores combinables entre chunks:
-      - Sumas (monto, n_licitaciones): acumulacion directa.
-      - Promedios (oferentes_promedio): acumula sum+count, calcula media al final.
-      - Unicidad (n_proveedores, n_organismos, n_rubros): acumula sets, len() al final.
-      - Mediana (oferentes_mediana): acumula lista de valores, calcula al final.
+    Pipeline:
+      1. Lee el CSV en chunks de 100k filas (cada fila es una *linea* de licitacion).
+      2. Agrega cada chunk a nivel de licitacion (CodigoExterno) con groupby.
+      3. Combina los chunks y vuelve a agrupar por CodigoExterno para manejar
+         licitaciones que se parten entre chunks.
+      4. Calcula el monto definitivo por licitacion:
+           a) MontoTotalAdjudicado si existe y > 0,
+           b) sino la suma de MontoLineaAdjudica de la licitacion,
+           c) sino MontoEstimado como fallback.
+      5. Genera los 5 DataFrames agregados por categoria, organismo, region,
+         proveedor y competencia, contando *licitaciones unicas* (no filas).
     """
     global total_licitaciones_session
 
-    # Acumuladores por tipo de agregado
-    # Categoria: key = Rubro1
-    acc_cat = {}
-    # Organismo: key = (NombreOrganismo, sector)
-    acc_org = {}
-    # Region: key = RegionUnidad
-    acc_reg = {}
-    # Proveedor: key = NombreProveedor
-    acc_prov = {}
-    # Competencia: key = Rubro1
-    acc_comp = {}
+    usecols = _available_usecols(csv_path)
+    has_total_adj = 'MontoTotalAdjudicado' in usecols
 
     records_in_file = 0
+    chunk_tenders = []  # lista de DataFrames de tender-level por chunk
 
     try:
         for chunk in pd.read_csv(
             csv_path, sep=';', encoding='latin-1',
-            usecols=USECOLS, dtype=str,
+            usecols=usecols, dtype=str,
             chunksize=100_000, on_bad_lines='skip', quoting=1
         ):
             if interrupted:
@@ -184,134 +196,115 @@ def process_csv(csv_path, year, month):
             chunk['MontoLineaAdjudica'] = pd.to_numeric(chunk['MontoLineaAdjudica'], errors='coerce').fillna(0)
             chunk['MontoEstimado'] = pd.to_numeric(chunk['MontoEstimado'], errors='coerce').fillna(0)
             chunk['NumeroOferentes'] = pd.to_numeric(chunk['NumeroOferentes'], errors='coerce').fillna(0)
+            if has_total_adj:
+                chunk['MontoTotalAdjudicado'] = pd.to_numeric(chunk['MontoTotalAdjudicado'], errors='coerce').fillna(0)
 
-            chunk['monto'] = chunk['MontoLineaAdjudica'].where(
-                chunk['MontoLineaAdjudica'] > 0, chunk['MontoEstimado']
-            )
-            chunk['Rubro1'] = chunk['Rubro1'].fillna('Sin categoria')
-            chunk['NombreOrganismo'] = chunk['NombreOrganismo'].fillna('Sin organismo')
-            chunk['sector'] = chunk['sector'].fillna('Sin sector')
-            chunk['RegionUnidad'] = chunk['RegionUnidad'].fillna('Sin region')
+            # Limpieza de categoricas para evitar duplicados por whitespace/encoding
+            chunk['Rubro1'] = chunk['Rubro1'].fillna('Sin categoria').str.strip()
+            chunk['NombreOrganismo'] = chunk['NombreOrganismo'].fillna('Sin organismo').str.strip()
+            chunk['sector'] = chunk['sector'].fillna('Sin sector').str.strip().replace({'': 'Sin sector'})
+            chunk['RegionUnidad'] = chunk['RegionUnidad'].fillna('Sin region').str.strip()
+            chunk['NombreProveedor'] = chunk['NombreProveedor'].fillna('').str.strip()
 
             records_in_file += len(chunk)
             total_licitaciones_session += len(chunk)
 
-            # --- CATEGORIA ---
-            for rubro, grp in chunk.groupby('Rubro1', sort=False):
-                if rubro not in acc_cat:
-                    acc_cat[rubro] = {
-                        'n_lic': 0, 'monto_sum': 0.0,
-                        'ofert_sum': 0.0, 'ofert_count': 0,
-                        'provs': set(), 'orgs': set()
-                    }
-                d = acc_cat[rubro]
-                d['n_lic'] += len(grp)
-                d['monto_sum'] += grp['monto'].sum()
-                ofert = grp['NumeroOferentes']
-                d['ofert_sum'] += ofert.sum()
-                d['ofert_count'] += len(ofert)
-                d['provs'].update(grp['NombreProveedor'].dropna().unique())
-                d['orgs'].update(grp['NombreOrganismo'].dropna().unique())
+            # --- Agregar a nivel de licitacion (una fila por CodigoExterno por chunk) ---
+            agg_spec = {
+                'monto_linea_sum': ('MontoLineaAdjudica', 'sum'),
+                'monto_estimado': ('MontoEstimado', 'first'),
+                'Rubro1': ('Rubro1', 'first'),
+                'NombreOrganismo': ('NombreOrganismo', 'first'),
+                'sector': ('sector', 'first'),
+                'RegionUnidad': ('RegionUnidad', 'first'),
+                'NombreProveedor': ('NombreProveedor', 'first'),
+                'NumeroOferentes': ('NumeroOferentes', 'first'),
+            }
+            if has_total_adj:
+                agg_spec['monto_total_adj'] = ('MontoTotalAdjudicado', 'first')
 
-            # --- ORGANISMO ---
-            for (org, sec), grp in chunk.groupby(['NombreOrganismo', 'sector'], sort=False):
-                key = (org, sec)
-                if key not in acc_org:
-                    acc_org[key] = {'n_lic': 0, 'monto_sum': 0.0, 'ofert_sum': 0.0, 'ofert_count': 0}
-                d = acc_org[key]
-                d['n_lic'] += len(grp)
-                d['monto_sum'] += grp['monto'].sum()
-                ofert = grp['NumeroOferentes']
-                d['ofert_sum'] += ofert.sum()
-                d['ofert_count'] += len(ofert)
-
-            # --- REGION ---
-            for region, grp in chunk.groupby('RegionUnidad', sort=False):
-                if region not in acc_reg:
-                    acc_reg[region] = {'n_lic': 0, 'monto_sum': 0.0, 'orgs': set()}
-                d = acc_reg[region]
-                d['n_lic'] += len(grp)
-                d['monto_sum'] += grp['monto'].sum()
-                d['orgs'].update(grp['NombreOrganismo'].dropna().unique())
-
-            # --- PROVEEDOR ---
-            prov_mask = chunk['NombreProveedor'].notna() & (chunk['NombreProveedor'] != '')
-            for prov, grp in chunk[prov_mask].groupby('NombreProveedor', sort=False):
-                if prov not in acc_prov:
-                    acc_prov[prov] = {'n_adj': 0, 'monto_sum': 0.0, 'rubros': set()}
-                d = acc_prov[prov]
-                d['n_adj'] += len(grp)
-                d['monto_sum'] += grp['monto'].sum()
-                d['rubros'].update(grp['Rubro1'].dropna().unique())
-
-            # --- COMPETENCIA ---
-            for rubro, grp in chunk.groupby('Rubro1', sort=False):
-                if rubro not in acc_comp:
-                    acc_comp[rubro] = {'ofert_vals': [], 'n_lic': 0}
-                d = acc_comp[rubro]
-                d['ofert_vals'].extend(grp['NumeroOferentes'].tolist())
-                d['n_lic'] += len(grp)
+            chunk_tenders.append(
+                chunk.groupby('CodigoExterno', sort=False).agg(**agg_spec).reset_index()
+            )
 
     except Exception as e:
         print(f"  Error procesando: {e}")
         return None, None, None, None, None, 0
 
-    if interrupted:
+    if interrupted or not chunk_tenders:
         return None, None, None, None, None, 0
 
-    # --- Construir DataFrames con valores correctamente combinados ---
+    # --- Combinar chunks: una licitacion puede partirse entre varios chunks ---
+    raw = pd.concat(chunk_tenders, ignore_index=True)
 
-    df_cat = pd.DataFrame([
-        {
-            'anio': year, 'mes': month, 'Rubro1': rubro,
-            'n_licitaciones': d['n_lic'],
-            'monto_adjudicado': d['monto_sum'],
-            'oferentes_promedio': d['ofert_sum'] / d['ofert_count'] if d['ofert_count'] else 0.0,
-            'n_proveedores': len(d['provs']),
-            'n_organismos': len(d['orgs']),
-        }
-        for rubro, d in acc_cat.items()
-    ])
+    final_agg = {
+        'monto_linea_sum': 'sum',          # acumular monto adjudicado entre chunks
+        'monto_estimado': 'first',
+        'Rubro1': 'first',
+        'NombreOrganismo': 'first',
+        'sector': 'first',
+        'RegionUnidad': 'first',
+        'NombreProveedor': 'first',
+        'NumeroOferentes': 'first',
+    }
+    if has_total_adj:
+        final_agg['monto_total_adj'] = 'first'
 
-    df_org = pd.DataFrame([
-        {
-            'anio': year, 'NombreOrganismo': org, 'sector': sec,
-            'n_licitaciones': d['n_lic'],
-            'monto_total': d['monto_sum'],
-            'oferentes_promedio': d['ofert_sum'] / d['ofert_count'] if d['ofert_count'] else 0.0,
-        }
-        for (org, sec), d in acc_org.items()
-    ])
+    tenders = raw.groupby('CodigoExterno', sort=False).agg(final_agg).reset_index()
 
-    df_reg = pd.DataFrame([
-        {
-            'anio': year, 'RegionUnidad': region,
-            'n_licitaciones': d['n_lic'],
-            'monto_total': d['monto_sum'],
-            'n_organismos': len(d['orgs']),
-        }
-        for region, d in acc_reg.items()
-    ])
+    # --- Monto definitivo por licitacion ---
+    if has_total_adj:
+        tenders['monto'] = tenders['monto_total_adj'].where(
+            tenders['monto_total_adj'] > 0, tenders['monto_linea_sum']
+        )
+    else:
+        tenders['monto'] = tenders['monto_linea_sum']
+    # Fallback a MontoEstimado solo si no hay adjudicado (una vez por licitacion)
+    tenders['monto'] = tenders['monto'].where(tenders['monto'] > 0, tenders['monto_estimado'])
 
-    df_prov = pd.DataFrame([
-        {
-            'anio': year, 'NombreProveedor': prov,
-            'n_adjudicaciones': d['n_adj'],
-            'monto_total': d['monto_sum'],
-            'n_rubros': len(d['rubros']),
-        }
-        for prov, d in acc_prov.items()
-    ])
+    # --- Categoria (una licitacion = una fila => count = unicas, sum = correcto) ---
+    df_cat = tenders.groupby('Rubro1', sort=False).agg(
+        n_licitaciones=('CodigoExterno', 'count'),
+        monto_adjudicado=('monto', 'sum'),
+        oferentes_promedio=('NumeroOferentes', 'mean'),
+        n_proveedores=('NombreProveedor', lambda s: s[s != ''].nunique()),
+        n_organismos=('NombreOrganismo', 'nunique'),
+    ).reset_index()
+    df_cat.insert(0, 'mes', month)
+    df_cat.insert(0, 'anio', year)
 
-    df_comp = pd.DataFrame([
-        {
-            'anio': year, 'Rubro1': rubro,
-            'n_licitaciones': d['n_lic'],
-            'oferentes_promedio': sum(d['ofert_vals']) / len(d['ofert_vals']) if d['ofert_vals'] else 0.0,
-            'oferentes_mediana': float(pd.Series(d['ofert_vals']).median()) if d['ofert_vals'] else 0.0,
-        }
-        for rubro, d in acc_comp.items()
-    ])
+    # --- Organismo ---
+    df_org = tenders.groupby(['NombreOrganismo', 'sector'], sort=False).agg(
+        n_licitaciones=('CodigoExterno', 'count'),
+        monto_total=('monto', 'sum'),
+        oferentes_promedio=('NumeroOferentes', 'mean'),
+    ).reset_index()
+    df_org.insert(0, 'anio', year)
+
+    # --- Region ---
+    df_reg = tenders.groupby('RegionUnidad', sort=False).agg(
+        n_licitaciones=('CodigoExterno', 'count'),
+        monto_total=('monto', 'sum'),
+        n_organismos=('NombreOrganismo', 'nunique'),
+    ).reset_index()
+    df_reg.insert(0, 'anio', year)
+
+    # --- Proveedor (excluir vacios) ---
+    valid_prov = tenders[tenders['NombreProveedor'] != '']
+    df_prov = valid_prov.groupby('NombreProveedor', sort=False).agg(
+        n_adjudicaciones=('CodigoExterno', 'count'),
+        monto_total=('monto', 'sum'),
+        n_rubros=('Rubro1', 'nunique'),
+    ).reset_index()
+    df_prov.insert(0, 'anio', year)
+
+    # --- Competencia ---
+    df_comp = tenders.groupby('Rubro1', sort=False).agg(
+        n_licitaciones=('CodigoExterno', 'count'),
+        oferentes_promedio=('NumeroOferentes', 'mean'),
+        oferentes_mediana=('NumeroOferentes', 'median'),
+    ).reset_index()
+    df_comp.insert(0, 'anio', year)
 
     return df_cat, df_org, df_reg, df_prov, df_comp, records_in_file
 
@@ -358,52 +351,72 @@ def consolidate_final():
         if (d / 'comp.parquet').exists():
             comps.append(pd.read_parquet(d / 'comp.parquet'))
 
-    # --- Categoria mensual (granularidad original: anio+mes+Rubro1) ---
+    def _norm(df, cols):
+        """Limpia espacios y vacios para evitar duplicados al hacer groupby."""
+        for c in cols:
+            if c in df.columns:
+                df[c] = df[c].fillna(f'Sin {c}').astype(str).str.strip()
+                df.loc[df[c] == '', c] = f'Sin {c}'
+        return df
+
+    # --- Categoria mensual (granularidad: anio+mes+Rubro1) ---
     df_cat = pd.concat(cats, ignore_index=True)
+    df_cat = _norm(df_cat, ['Rubro1'])
+    df_cat = df_cat.groupby(['anio', 'mes', 'Rubro1'], as_index=False).agg(
+        n_licitaciones=('n_licitaciones', 'sum'),
+        monto_adjudicado=('monto_adjudicado', 'sum'),
+        oferentes_promedio=('oferentes_promedio', 'mean'),
+        n_proveedores=('n_proveedores', 'max'),
+        n_organismos=('n_organismos', 'max'),
+    )
     out = PROCESSED_DIR / 'agregado_mensual_categoria.parquet'
     df_cat.to_parquet(out, index=False)
     print(f"    [OK] {out.name}: {len(df_cat):,} filas")
 
     # --- Organismo anual (re-agregar meses -> año) ---
     df_org = pd.concat(orgs, ignore_index=True)
-    df_org_anual = df_org.groupby(['anio', 'NombreOrganismo', 'sector']).agg(
+    df_org = _norm(df_org, ['NombreOrganismo', 'sector'])
+    df_org_anual = df_org.groupby(['anio', 'NombreOrganismo', 'sector'], as_index=False).agg(
         n_licitaciones=('n_licitaciones', 'sum'),
         monto_total=('monto_total', 'sum'),
-        oferentes_promedio=('oferentes_promedio', 'mean')
-    ).reset_index()
+        oferentes_promedio=('oferentes_promedio', 'mean'),
+    )
     out = PROCESSED_DIR / 'agregado_anual_organismo_clean.parquet'
     df_org_anual.to_parquet(out, index=False)
     print(f"    [OK] {out.name}: {len(df_org_anual):,} filas")
 
     # --- Region anual ---
     df_reg = pd.concat(regs, ignore_index=True)
-    df_reg_anual = df_reg.groupby(['anio', 'RegionUnidad']).agg(
+    df_reg = _norm(df_reg, ['RegionUnidad'])
+    df_reg_anual = df_reg.groupby(['anio', 'RegionUnidad'], as_index=False).agg(
         n_licitaciones=('n_licitaciones', 'sum'),
         monto_total=('monto_total', 'sum'),
-        n_organismos=('n_organismos', 'sum')
-    ).reset_index()
+        n_organismos=('n_organismos', 'sum'),
+    )
     out = PROCESSED_DIR / 'agregado_anual_region_clean.parquet'
     df_reg_anual.to_parquet(out, index=False)
     print(f"    [OK] {out.name}: {len(df_reg_anual):,} filas")
 
     # --- Competencia por rubro (anual) ---
     df_comp = pd.concat(comps, ignore_index=True)
-    df_comp_anual = df_comp.groupby(['anio', 'Rubro1']).agg(
+    df_comp = _norm(df_comp, ['Rubro1'])
+    df_comp_anual = df_comp.groupby(['anio', 'Rubro1'], as_index=False).agg(
         n_licitaciones=('n_licitaciones', 'sum'),
         oferentes_promedio=('oferentes_promedio', 'mean'),
-        oferentes_mediana=('oferentes_mediana', 'mean')
-    ).reset_index()
+        oferentes_mediana=('oferentes_mediana', 'mean'),
+    )
     out = PROCESSED_DIR / 'competencia_por_rubro.parquet'
     df_comp_anual.to_parquet(out, index=False)
     print(f"    [OK] {out.name}: {len(df_comp_anual):,} filas")
 
     # --- Proveedor top 500 (re-agregar por año, filtrar al final) ---
     df_prov = pd.concat(provs, ignore_index=True)
-    df_prov_anual = df_prov.groupby(['anio', 'NombreProveedor']).agg(
+    df_prov = _norm(df_prov, ['NombreProveedor'])
+    df_prov_anual = df_prov.groupby(['anio', 'NombreProveedor'], as_index=False).agg(
         n_adjudicaciones=('n_adjudicaciones', 'sum'),
         monto_total=('monto_total', 'sum'),
-        n_rubros=('n_rubros', 'max')
-    ).reset_index()
+        n_rubros=('n_rubros', 'max'),
+    )
     top_provs = df_prov_anual.groupby('NombreProveedor')['monto_total'].sum().nlargest(500).index
     df_prov_top = df_prov_anual[df_prov_anual['NombreProveedor'].isin(top_provs)]
     out = PROCESSED_DIR / 'agregado_anual_proveedor_top500.parquet'
@@ -411,23 +424,23 @@ def consolidate_final():
     print(f"    [OK] {out.name}: {len(df_prov_top):,} filas")
 
     # --- Metricas anuales por categoria con indice de oportunidad ---
-    df_anual_cat = df_cat.groupby(['anio', 'Rubro1']).agg(
+    df_anual_cat = df_cat.groupby(['anio', 'Rubro1'], as_index=False).agg(
         monto_adjudicado=('monto_adjudicado', 'sum'),
         n_licitaciones=('n_licitaciones', 'sum'),
-        oferentes_promedio=('oferentes_promedio', 'mean')
-    ).reset_index()
+        oferentes_promedio=('oferentes_promedio', 'mean'),
+    )
     df_anual_cat = df_anual_cat.sort_values(['Rubro1', 'anio'])
     df_anual_cat['crecimiento_monto_pct'] = df_anual_cat.groupby('Rubro1')['monto_adjudicado'].pct_change() * 100
     df_anual_cat['crecimiento_lic_pct'] = df_anual_cat.groupby('Rubro1')['n_licitaciones'].pct_change() * 100
 
     latest = df_anual_cat[df_anual_cat['anio'] == df_anual_cat['anio'].max()].copy()
     if len(latest) > 0:
-        def _norm(s):
+        def _minmax(s):
             rng = s.max() - s.min()
             return (s - s.min()) / (rng + 1e-9)
-        latest['monto_norm'] = _norm(latest['monto_adjudicado'])
-        latest['crec_norm'] = _norm(latest['crecimiento_monto_pct'].fillna(0))
-        latest['comp_norm'] = 1 - _norm(latest['oferentes_promedio'])
+        latest['monto_norm'] = _minmax(latest['monto_adjudicado'])
+        latest['crec_norm'] = _minmax(latest['crecimiento_monto_pct'].fillna(0))
+        latest['comp_norm'] = 1 - _minmax(latest['oferentes_promedio'])
         latest['indice_oportunidad'] = (latest['monto_norm'] * 0.4 +
                                         latest['crec_norm'] * 0.35 +
                                         latest['comp_norm'] * 0.25)
