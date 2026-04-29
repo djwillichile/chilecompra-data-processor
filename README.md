@@ -232,7 +232,7 @@ repositorio de analisis al finalizar cada corrida. Para activarlo:
 3. **Listo.** En la siguiente corrida de "Procesar datos ChileCompra", al
    terminar de publicar el release, el workflow hara `git clone` del repo de
    analisis, copiara los Parquet a `data/processed/`, y hara commit + push como
-   `djwillichile <guillermo.f1990@gmail.com>` solo si hay cambios reales.
+   `djwillichile` solo si hay cambios reales.
 
 Si el secret no esta configurado, el workflow omite el step y solo publica el
 release (comportamiento por defecto).
