@@ -39,9 +39,11 @@ jobs:
           path: |
             data/processed/monthly
             data/processed/_progress.json
-          key: chilecompra-progress-${{ github.run_id }}
+          # Bump del prefijo (-v2) para invalidar caches generados antes
+          # del fix de inflacion a nivel de licitacion.
+          key: chilecompra-progress-v2-${{ github.run_id }}
           restore-keys: |
-            chilecompra-progress-
+            chilecompra-progress-v2-
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
