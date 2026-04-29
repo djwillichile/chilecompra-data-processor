@@ -109,9 +109,13 @@ jobs:
 
           | Archivo | Descripcion |
           |---------|-------------|
+          | \`licitaciones_unicas.parquet\` | Tender-level: una fila por licitacion (CodigoExterno) |
+          | \`licitaciones_clean.parquet\` | Tender-level con nombres normalizados para Sankey |
           | \`agregado_mensual_categoria.parquet\` | Gasto mensual por rubro/categoria |
-          | \`agregado_anual_organismo_clean.parquet\` | Gasto anual por organismo y sector |
-          | \`agregado_anual_region_clean.parquet\` | Gasto anual por region |
+          | \`agregado_anual_organismo.parquet\` | Gasto anual por organismo y sector |
+          | \`agregado_anual_organismo_clean.parquet\` | Igual al anterior (alias con sufijo _clean) |
+          | \`agregado_anual_region.parquet\` | Gasto anual por region |
+          | \`agregado_anual_region_clean.parquet\` | Igual al anterior (alias con sufijo _clean) |
           | \`agregado_anual_proveedor_top500.parquet\` | Top 500 proveedores por año |
           | \`competencia_por_rubro.parquet\` | Nivel de competencia por rubro |
           | \`metricas_anuales_categoria.parquet\` | Metricas con indice de oportunidad |

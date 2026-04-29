@@ -205,6 +205,7 @@ def process_csv(csv_path, year, month):
             chunk['sector'] = chunk['sector'].fillna('Sin sector').str.strip().replace({'': 'Sin sector'})
             chunk['RegionUnidad'] = chunk['RegionUnidad'].fillna('Sin region').str.strip()
             chunk['NombreProveedor'] = chunk['NombreProveedor'].fillna('').str.strip()
+            chunk['Estado'] = chunk['Estado'].fillna('Desconocido').str.strip().replace({'': 'Desconocido'})
 
             records_in_file += len(chunk)
             total_licitaciones_session += len(chunk)
@@ -217,6 +218,7 @@ def process_csv(csv_path, year, month):
                 'NombreOrganismo': ('NombreOrganismo', 'first'),
                 'sector': ('sector', 'first'),
                 'RegionUnidad': ('RegionUnidad', 'first'),
+                'Estado': ('Estado', 'first'),
                 'NombreProveedor': ('NombreProveedor', 'first'),
                 'NumeroOferentes': ('NumeroOferentes', 'first'),
             }
@@ -229,10 +231,10 @@ def process_csv(csv_path, year, month):
 
     except Exception as e:
         print(f"  Error procesando: {e}")
-        return None, None, None, None, None, 0
+        return None, None, None, None, None, None, 0
 
     if interrupted or not chunk_tenders:
-        return None, None, None, None, None, 0
+        return None, None, None, None, None, None, 0
 
     # --- Combinar chunks: una licitacion puede partirse entre varios chunks ---
     raw = pd.concat(chunk_tenders, ignore_index=True)
@@ -244,6 +246,7 @@ def process_csv(csv_path, year, month):
         'NombreOrganismo': 'first',
         'sector': 'first',
         'RegionUnidad': 'first',
+        'Estado': 'first',
         'NombreProveedor': 'first',
         'NumeroOferentes': 'first',
     }
@@ -306,14 +309,30 @@ def process_csv(csv_path, year, month):
     ).reset_index()
     df_comp.insert(0, 'anio', year)
 
-    return df_cat, df_org, df_reg, df_prov, df_comp, records_in_file
+    # --- Tender-level (una fila por licitacion) ---
+    # Renombra a los nombres esperados por el repo de analisis (clean_data.py).
+    df_lic = tenders[[
+        'CodigoExterno', 'Rubro1', 'NombreOrganismo', 'sector', 'RegionUnidad',
+        'Estado', 'NombreProveedor', 'NumeroOferentes',
+        'monto_linea_sum', 'monto_estimado', 'monto',
+    ]].rename(columns={
+        'monto_linea_sum': 'MontoLineaAdjudica',
+        'monto_estimado': 'MontoEstimado',
+        'monto': 'MontoAdjudicado',
+    }).copy()
+    if has_total_adj:
+        df_lic['MontoTotalAdjudicado'] = tenders['monto_total_adj']
+    df_lic.insert(0, 'mes', month)
+    df_lic.insert(0, 'anio', year)
+
+    return df_cat, df_org, df_reg, df_prov, df_comp, df_lic, records_in_file
 
 
 # ==========================================
 # GUARDADO MENSUAL - UN DIRECTORIO POR MES
 # ==========================================
-def save_monthly(df_cat, df_org, df_reg, df_prov, df_comp, tag):
-    """Guarda los 5 agregados de un mes, cada uno en su propio parquet."""
+def save_monthly(df_cat, df_org, df_reg, df_prov, df_comp, df_lic, tag):
+    """Guarda los 6 agregados de un mes, cada uno en su propio parquet."""
     month_dir = MONTHLY_DIR / tag
     month_dir.mkdir(exist_ok=True)
     df_cat.to_parquet(month_dir / 'cat.parquet', index=False)
@@ -321,6 +340,7 @@ def save_monthly(df_cat, df_org, df_reg, df_prov, df_comp, tag):
     df_reg.to_parquet(month_dir / 'reg.parquet', index=False)
     df_prov.to_parquet(month_dir / 'prov.parquet', index=False)
     df_comp.to_parquet(month_dir / 'comp.parquet', index=False)
+    df_lic.to_parquet(month_dir / 'lic.parquet', index=False)
 
 
 # ==========================================
@@ -338,7 +358,7 @@ def consolidate_final():
         print("  [!] No hay datos mensuales para consolidar.")
         return
 
-    cats, orgs, regs, provs, comps = [], [], [], [], []
+    cats, orgs, regs, provs, comps, lics = [], [], [], [], [], []
     for d in month_dirs:
         if (d / 'cat.parquet').exists():
             cats.append(pd.read_parquet(d / 'cat.parquet'))
@@ -350,6 +370,8 @@ def consolidate_final():
             provs.append(pd.read_parquet(d / 'prov.parquet'))
         if (d / 'comp.parquet').exists():
             comps.append(pd.read_parquet(d / 'comp.parquet'))
+        if (d / 'lic.parquet').exists():
+            lics.append(pd.read_parquet(d / 'lic.parquet'))
 
     def _norm(df, cols):
         """Limpia espacios y vacios para evitar duplicados al hacer groupby."""
@@ -381,9 +403,15 @@ def consolidate_final():
         monto_total=('monto_total', 'sum'),
         oferentes_promedio=('oferentes_promedio', 'mean'),
     )
+    # Salida principal con sufijo _clean (ya esta limpio aqui).
+    # Tambien escribimos un alias sin sufijo para que el clean_data.py del
+    # repo de analisis encuentre el archivo de entrada que espera.
     out = PROCESSED_DIR / 'agregado_anual_organismo_clean.parquet'
     df_org_anual.to_parquet(out, index=False)
     print(f"    [OK] {out.name}: {len(df_org_anual):,} filas")
+    out_alias = PROCESSED_DIR / 'agregado_anual_organismo.parquet'
+    df_org_anual.to_parquet(out_alias, index=False)
+    print(f"    [OK] {out_alias.name}: alias")
 
     # --- Region anual ---
     df_reg = pd.concat(regs, ignore_index=True)
@@ -396,6 +424,9 @@ def consolidate_final():
     out = PROCESSED_DIR / 'agregado_anual_region_clean.parquet'
     df_reg_anual.to_parquet(out, index=False)
     print(f"    [OK] {out.name}: {len(df_reg_anual):,} filas")
+    out_alias = PROCESSED_DIR / 'agregado_anual_region.parquet'
+    df_reg_anual.to_parquet(out_alias, index=False)
+    print(f"    [OK] {out_alias.name}: alias")
 
     # --- Competencia por rubro (anual) ---
     df_comp = pd.concat(comps, ignore_index=True)
@@ -450,6 +481,30 @@ def consolidate_final():
     out = PROCESSED_DIR / 'metricas_anuales_categoria.parquet'
     df_anual_cat.to_parquet(out, index=False)
     print(f"    [OK] {out.name}: {len(df_anual_cat):,} filas")
+
+    # --- Tender-level: una fila por licitacion (CodigoExterno) ---
+    # Esto permite al repo de analisis (clean_data.py, sankey_api.py) trabajar
+    # con datos a nivel de licitacion sin reproducir todo el procesamiento.
+    if lics:
+        df_lic = pd.concat(lics, ignore_index=True)
+        df_lic = _norm(df_lic, ['Rubro1', 'NombreOrganismo', 'sector',
+                                'RegionUnidad', 'Estado'])
+
+        # licitaciones_unicas.parquet: input crudo del clean_data.py del repo
+        # de analisis (mismos nombres de columna del CSV original).
+        out = PROCESSED_DIR / 'licitaciones_unicas.parquet'
+        df_lic.to_parquet(out, index=False)
+        print(f"    [OK] {out.name}: {len(df_lic):,} licitaciones")
+
+        # licitaciones_clean.parquet: variante con nombres de columna que
+        # espera sankey_api.py (Sector, Region, MontoAdjudicado capitalizados).
+        df_lic_clean = df_lic.rename(columns={
+            'sector': 'Sector',
+            'RegionUnidad': 'Region',
+        })
+        out = PROCESSED_DIR / 'licitaciones_clean.parquet'
+        df_lic_clean.to_parquet(out, index=False)
+        print(f"    [OK] {out.name}: {len(df_lic_clean):,} filas")
 
     # --- Sankey: top 15 por nivel del año mas reciente disponible ---
     max_anio = df_cat['anio'].max()
@@ -607,14 +662,14 @@ def main():
         csv_size = csv_path.stat().st_size / (1024 * 1024)
         print(f"procesando ({csv_size:.0f}MB)...", end=" ", flush=True)
 
-        df_cat, df_org, df_reg, df_prov, df_comp, records = process_csv(str(csv_path), year, month)
+        df_cat, df_org, df_reg, df_prov, df_comp, df_lic, records = process_csv(str(csv_path), year, month)
 
         if interrupted:
             csv_path.unlink(missing_ok=True)
             break
 
         if df_cat is not None and len(df_cat) > 0:
-            save_monthly(df_cat, df_org, df_reg, df_prov, df_comp, tag)
+            save_monthly(df_cat, df_org, df_reg, df_prov, df_comp, df_lic, tag)
             progress["processed_months"].append(tag)
             progress["total_records"] += records
             save_progress(progress)
