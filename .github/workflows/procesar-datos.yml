@@ -160,7 +160,7 @@ jobs:
 
           cd "$ANALYSIS_DIR"
           git config user.name  "djwillichile"
-          git config user.email "guillermo.f1990@gmail.com"
+          git config user.email "32119499+djwillichile@users.noreply.github.com"
           git add data/processed/
 
           if git diff --cached --quiet; then
